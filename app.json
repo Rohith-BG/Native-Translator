@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Native-Translator",
+    "slug": "native-translator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nativetranslator.app"
+    },
+    "android": {
+      "minSdkVersion": 26,
+      "targetSdkVersion": 35,
+      "compileSdkVersion": 35,
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0A0F",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.nativetranslator.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "f314a919-fe59-4498-b323-5fa2fb22f6b1"
+      }
+    },
+    "owner": "rohithbg"
+  }
+}
