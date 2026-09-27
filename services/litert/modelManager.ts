@@ -10,6 +10,7 @@ type LiteRTLMInstance = {
   execute: (...args: unknown[]) => Promise<string>;
   unload: () => Promise<void>;
   setMemoryWarningCallback?: (cb: (level: string) => void) => void;
+  resetConversation?: (historyJson?: string, systemPrompt?: string) => void;
 };
 
 let createLLM: (opts: Record<string, unknown>) => LiteRTLMInstance;
@@ -39,6 +40,7 @@ import {
 import {
   ModelNotLoadedError,
   OutOfMemoryError,
+  TranslationError,
 } from '@/services/litert/errors';
 import type { ModelStatus, StreamCallbacks } from '@/services/litert/types';
 
@@ -201,6 +203,13 @@ class ModelManager {
       return;
     }
 
+    // Always reset conversation so each translation has a clean KV-cache and avoids context overflow
+    try {
+      this.llm.resetConversation?.();
+    } catch (resetErr) {
+      console.warn('Could not reset conversation context', resetErr);
+    }
+
     let assembled = '';
     let completed = false;
 
@@ -230,6 +239,12 @@ class ModelManager {
         callbacks.onComplete((result || assembled).trim());
       }
     } catch (error) {
+      // Re-reset on error so engine does not remain trapped in state 7
+      try {
+        this.llm.resetConversation?.();
+      } catch {
+        // ignore
+      }
       const mapped = this.mapError(error);
       if (!completed) {
         callbacks.onError(mapped);
@@ -256,6 +271,16 @@ class ModelManager {
     if (isMemoryError(error)) {
       const memErr = error as { estimate?: { recommendation?: string }; message?: string };
       return new OutOfMemoryError(memErr.estimate?.recommendation || memErr.message);
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    if (
+      msg.includes('Failed to invoke the compiled model') ||
+      msg.includes('state: 7') ||
+      msg.includes('Status Code: 13')
+    ) {
+      return new TranslationError(
+        'Text segment exceeded model memory limits. Translating with smaller chunks.',
+      );
     }
     if (error instanceof Error) {
       return error;

@@ -7,7 +7,7 @@ import {
   TranslationError,
 } from '@/services/litert/errors';
 import { chunkText } from '@/utils/textChunker';
-import { CONTEXT_CHAR_SOFT_LIMIT } from '@/constants/model';
+import { DOC_CHUNK_CHAR_LIMIT } from '@/constants/model';
 import type { LanguageCode } from '@/services/litert/types';
 
 interface ChunkProgress {
@@ -26,6 +26,39 @@ const toUserMessage = (error: unknown): string => {
     return error.message;
   }
   return 'Translation failed. Check the model status and try again.';
+};
+
+const translateSingleChunk = (
+  chunk: string,
+  sourceLang: LanguageCode,
+  targetLang: LanguageCode,
+  id: number,
+  runIdRef: { current: number },
+  onTokenChunk: (token: string) => void,
+): Promise<string> => {
+  return new Promise<string>((resolve, reject) => {
+    let accumulated = '';
+    void TranslationService.translate(
+      {
+        sourceText: chunk,
+        sourceLang,
+        targetLang,
+      },
+      {
+        onToken: (token) => {
+          if (id !== runIdRef.current) return;
+          accumulated += token;
+          onTokenChunk(accumulated);
+        },
+        onComplete: (text) => {
+          resolve(text);
+        },
+        onError: (err) => {
+          reject(err);
+        },
+      },
+    );
+  });
 };
 
 /**
@@ -52,7 +85,7 @@ export const useDocumentTranslation = () => {
       setOutput('');
       setIsTranslating(true);
 
-      const chunks = chunkText(fullText, CONTEXT_CHAR_SOFT_LIMIT);
+      const chunks = chunkText(fullText, DOC_CHUNK_CHAR_LIMIT, 0);
       const totalChunks = chunks.length;
       setProgress({ current: 0, total: totalChunks });
 
@@ -65,33 +98,54 @@ export const useDocumentTranslation = () => {
 
         setProgress({ current: i + 1, total: totalChunks });
 
+        // Small breather between chunks to let GC clean native buffers
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (cancelRef.current || id !== runId.current) {
+          break;
+        }
+
         try {
-          const chunkResult = await new Promise<string>((resolve, reject) => {
-            let accumulated = '';
-            void TranslationService.translate(
-              {
-                sourceText: chunks[i],
-                sourceLang,
-                targetLang,
-              },
-              {
-                onToken: (token) => {
-                  if (id !== runId.current) return;
-                  accumulated += token;
-                  // Show live progress: already-translated parts + current streaming chunk
-                  setOutput(
-                    [...translatedParts, accumulated].join('\n\n'),
-                  );
-                },
-                onComplete: (text) => {
-                  resolve(text);
-                },
-                onError: (err) => {
-                  reject(err);
-                },
+          let chunkResult = '';
+          try {
+            chunkResult = await translateSingleChunk(
+              chunks[i],
+              sourceLang,
+              targetLang,
+              id,
+              runId,
+              (accumulated) => {
+                setOutput([...translatedParts, accumulated].join('\n\n'));
               },
             );
-          });
+          } catch (firstErr) {
+            // If segment failed (e.g. memory spike), split this chunk in half and retry each half
+            if (chunks[i].length > 200) {
+              const half = Math.floor(chunks[i].length / 2);
+              const partA = chunks[i].slice(0, half);
+              const partB = chunks[i].slice(half);
+
+              const resA = await translateSingleChunk(
+                partA,
+                sourceLang,
+                targetLang,
+                id,
+                runId,
+                () => undefined,
+              );
+              await new Promise((resolve) => setTimeout(resolve, 60));
+              const resB = await translateSingleChunk(
+                partB,
+                sourceLang,
+                targetLang,
+                id,
+                runId,
+                () => undefined,
+              );
+              chunkResult = `${resA} ${resB}`.trim();
+            } else {
+              throw firstErr;
+            }
+          }
 
           translatedParts.push(chunkResult);
           setOutput(translatedParts.join('\n\n'));
