@@ -7,6 +7,40 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "scheme": "native-translator",
+    "sdkVersion": "57.0.0",
+    "plugins": [
+      "expo-router",
+      "react-native-litert-lm",
+      "expo-font",
+      "expo-splash-screen",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Native Translator needs your microphone to capture speech for voice translation.",
+          "speechRecognitionPermission": "Native Translator uses speech recognition to convert your voice to text for translation."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Native Translator needs camera access to capture images for text extraction and translation."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Native Translator needs photo library access to select images for text extraction."
+        }
+      ],
+      "expo-mlkit-ocr",
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nativetranslator.app"
@@ -21,14 +55,22 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "package": "com.nativetranslator.app"
+      "package": "com.nativetranslator.app",
+      "softwareKeyboardLayoutMode": "resize"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "experiments": {
+      "typedRoutes": true
     },
     "extra": {
       "eas": {
         "projectId": "f314a919-fe59-4498-b323-5fa2fb22f6b1"
+      },
+      "router": {
+        "origin": false
       }
     },
     "owner": "rohithbg"
