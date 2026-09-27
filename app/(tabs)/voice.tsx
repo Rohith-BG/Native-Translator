@@ -135,6 +135,9 @@ const VoiceScreen = () => {
     transform: [{ rotate: `${swapAngle.value}deg` }],
   }));
 
+  // Voice screen requires an explicit language — 'auto' from shared prefs must fall back
+  const voiceSourceLang = sourceLang === 'auto' ? 'en' : sourceLang;
+
   const onLeftMicPress = useCallback(() => {
     if (phase !== 'idle') {
       void abort();
@@ -144,9 +147,8 @@ const VoiceScreen = () => {
       void load();
       return;
     }
-    const lang = sourceLang === 'auto' ? 'en' : sourceLang;
-    void startListening(lang, 'left');
-  }, [phase, isReady, sourceLang, startListening, abort, load]);
+    void startListening(voiceSourceLang, 'left');
+  }, [phase, isReady, voiceSourceLang, startListening, abort, load]);
 
   const onRightMicPress = useCallback(() => {
     if (phase !== 'idle') {
@@ -206,10 +208,9 @@ const VoiceScreen = () => {
         {/* Language Row */}
         <View style={styles.langRow}>
           <LanguagePicker
-            label="Person A"
+            label="Person 1 speaks"
             selectedCode={sourceLang}
             onSelect={setSourceLang}
-            includeAutoDetect
           />
           <Pressable
             accessibilityRole="button"
@@ -221,7 +222,7 @@ const VoiceScreen = () => {
               <ArrowLeftRight color={darkTheme.secondary} size={20} />
             </Animated.View>
           </Pressable>
-          <LanguagePicker label="Person B" selectedCode={targetLang} onSelect={setTargetLang} />
+          <LanguagePicker label="Person 2 speaks" selectedCode={targetLang} onSelect={setTargetLang} />
         </View>
 
         {/* Status Indicator */}
@@ -257,13 +258,13 @@ const VoiceScreen = () => {
           </Animated.View>
         ) : null}
 
-        {/* Person A Panel */}
+        {/* Person 1 Panel */}
         <GlassCard>
           <View style={styles.panelHeader}>
             <Text style={styles.panelLabel}>
-              {getLanguageLabel(sourceLang === 'auto' ? 'en' : sourceLang)}
+              {getLanguageLabel(voiceSourceLang)}
             </Text>
-            <Text style={styles.personLabel}>Person A</Text>
+            <Text style={styles.personLabel}>Person 1</Text>
           </View>
 
           {leftDisplay ? (
@@ -288,7 +289,7 @@ const VoiceScreen = () => {
             accessibilityLabel={
               activeSpeaker === 'left' && phase === 'listening'
                 ? 'Stop listening'
-                : `Start listening in ${getLanguageLabel(sourceLang)}`
+                : `Start listening in ${getLanguageLabel(voiceSourceLang)}`
             }
             onPress={onLeftMicPress}
             style={[
@@ -311,11 +312,11 @@ const VoiceScreen = () => {
           </Pressable>
         </GlassCard>
 
-        {/* Person B Panel */}
+        {/* Person 2 Panel */}
         <GlassCard>
           <View style={styles.panelHeader}>
             <Text style={styles.panelLabel}>{getLanguageLabel(targetLang)}</Text>
-            <Text style={styles.personLabel}>Person B</Text>
+            <Text style={styles.personLabel}>Person 2</Text>
           </View>
 
           {rightDisplay ? (

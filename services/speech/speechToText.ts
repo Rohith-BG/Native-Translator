@@ -122,12 +122,15 @@ class SpeechToTextService {
     /* ---- Start recognition ---- */
     try {
       // ExpoSpeechRecognitionModule.start() accepts ExpoSpeechRecognitionOptions
+      // requiresOnDeviceRecognition is set to false so Android can fall back
+      // to network-based STT when the on-device language model is not downloaded.
+      // The translation itself is still fully on-device via LiteRT-LM.
       SpeechModule.start({
         lang: locale,
         interimResults: true,
         maxAlternatives: 1,
         continuous: false,
-        requiresOnDeviceRecognition: true,
+        requiresOnDeviceRecognition: false,
         volumeChangeEventOptions: { enabled: true, intervalMillis: 100 },
       });
       this.isListening = true;
