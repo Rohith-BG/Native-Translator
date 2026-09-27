@@ -19,11 +19,6 @@ export const TranslationResult: React.FC<TranslationResultProps> = ({
 }) => {
   const [copied, setCopied] = React.useState(false);
 
-  // Don't render when there's nothing to show
-  if (!text && !isStreaming) {
-    return null;
-  }
-
   useEffect(() => {
     if (!copied) {
       return;
@@ -39,6 +34,11 @@ export const TranslationResult: React.FC<TranslationResultProps> = ({
     await Clipboard.setStringAsync(text);
     setCopied(true);
   };
+
+  // Don't render when there's nothing to show
+  if (!text && !isStreaming) {
+    return null;
+  }
 
   return (
     <Animated.View entering={FadeInDown.duration(280).damping(18)}>
