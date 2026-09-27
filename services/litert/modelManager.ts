@@ -146,13 +146,15 @@ class ModelManager {
       await llm.loadModel(
         path,
         {
-          backend: 'gpu',
+          backend: 'cpu',
           temperature: 0.1,
           topK: 40,
           topP: 0.95,
           maxContextTokens: MODEL_MAX_TOKENS,
           maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          activationDataType: 'f16',
           thinking: { enabled: false },
+          forceLoad: true,
         },
         (progress: number) => {
           this.downloadProgress = progress;
