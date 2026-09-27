@@ -40,4 +40,5 @@ yarn-error.*
 /android
 
 .freebuff
+.agents/
 PRODUCT.md
