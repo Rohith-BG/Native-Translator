@@ -34,31 +34,39 @@ export const useTranslation = () => {
       setOutput('');
       setIsStreaming(true);
 
-      await TranslationService.translate(
-        { sourceText, sourceLang, targetLang },
-        {
-          onToken: (token) => {
-            if (id !== runId.current) {
-              return;
-            }
-            setOutput((current) => current + token);
+      try {
+        await TranslationService.translate(
+          { sourceText, sourceLang, targetLang },
+          {
+            onToken: (token) => {
+              if (id !== runId.current) {
+                return;
+              }
+              setOutput((current) => current + token);
+            },
+            onComplete: (fullText) => {
+              if (id !== runId.current) {
+                return;
+              }
+              setOutput(fullText);
+              setIsStreaming(false);
+            },
+            onError: (caught) => {
+              if (id !== runId.current) {
+                return;
+              }
+              setIsStreaming(false);
+              setError(toUserMessage(caught));
+            },
           },
-          onComplete: (fullText) => {
-            if (id !== runId.current) {
-              return;
-            }
-            setOutput(fullText);
-            setIsStreaming(false);
-          },
-          onError: (caught) => {
-            if (id !== runId.current) {
-              return;
-            }
-            setIsStreaming(false);
-            setError(toUserMessage(caught));
-          },
-        },
-      );
+        );
+      } catch (caught) {
+        if (id !== runId.current) {
+          return;
+        }
+        setIsStreaming(false);
+        setError(toUserMessage(caught));
+      }
     },
     [],
   );

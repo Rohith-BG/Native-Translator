@@ -172,7 +172,6 @@ class ModelManager {
       this.llm = null;
       const mapped = this.mapError(error);
       this.setStatus('error', mapped.message);
-      throw mapped;
     }
   }
 
@@ -206,13 +205,18 @@ class ModelManager {
     let completed = false;
 
     const onToken = (token: string, done: boolean) => {
-      if (token) {
-        assembled += token;
-        callbacks.onToken(token);
-      }
-      if (done) {
-        completed = true;
-        callbacks.onComplete(assembled.trim());
+      try {
+        if (token) {
+          assembled += token;
+          callbacks.onToken(token);
+        }
+        if (done) {
+          completed = true;
+          callbacks.onComplete(assembled.trim());
+        }
+      } catch (callbackError) {
+        // Prevent callback errors from crashing the native bridge
+        console.error('onToken callback error', callbackError);
       }
     };
 
@@ -220,13 +224,16 @@ class ModelManager {
       const result = await this.llm.execute(
         [{ type: 'text', text: prompt }],
         onToken,
-        { maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS, thinking: { enabled: false } },
+        { maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS },
       );
       if (!completed) {
         callbacks.onComplete((result || assembled).trim());
       }
     } catch (error) {
-      callbacks.onError(this.mapError(error));
+      const mapped = this.mapError(error);
+      if (!completed) {
+        callbacks.onError(mapped);
+      }
     }
   }
 
