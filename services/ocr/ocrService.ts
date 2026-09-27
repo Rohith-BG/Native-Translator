@@ -3,6 +3,14 @@
  *
  * Extracts text from images with bounding-box information for overlay
  * rendering. Safe import for Expo Go compatibility.
+ *
+ * expo-mlkit-ocr v0.2.x public API:
+ *   recognizeText(uri: string) → Promise<RecognitionResult>
+ *   isSupported() → boolean
+ *
+ * RecognitionResult = { text: string; blocks: TextBlock[] }
+ * TextBlock = { text: string; boundingBox: { x, y, width, height }; lines: TextLine[] }
+ * TextLine = { text: string; boundingBox: { x, y, width, height }; elements: TextElement[] }
  */
 
 export interface OCRBoundingBox {
@@ -26,63 +34,89 @@ export interface OCRResult {
   fullText: string;
 }
 
-let MlKitOcr: {
-  detectFromUri: (uri: string) => Promise<unknown[]>;
-} | null = null;
+/* -------------------------------------------------------------------------- */
+/*  Safe import – the native module only exists in a development build.       */
+/* -------------------------------------------------------------------------- */
 
+let recognizeTextFn: ((uri: string) => Promise<{
+  text: string;
+  blocks: Array<{
+    text: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+    lines: Array<{
+      text: string;
+      boundingBox: { x: number; y: number; width: number; height: number };
+    }>;
+  }>;
+}>) | null = null;
+
+let isSupportedFn: (() => boolean) | null = null;
 let nativeOCRAvailable = true;
 
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require('expo-mlkit-ocr');
-  MlKitOcr = mod.default ?? mod;
+  // expo-mlkit-ocr exports { recognizeText, isSupported } as named exports
+  recognizeTextFn = mod.recognizeText ?? null;
+  isSupportedFn = mod.isSupported ?? null;
 } catch {
   nativeOCRAvailable = false;
 }
 
-const mapBoundingBox = (frame: Record<string, unknown> | undefined): OCRBoundingBox => {
-  if (!frame) {
-    return { x: 0, y: 0, width: 0, height: 0 };
-  }
-  return {
-    x: Number(frame.x ?? frame.left ?? 0),
-    y: Number(frame.y ?? frame.top ?? 0),
-    width: Number(frame.width ?? 0),
-    height: Number(frame.height ?? 0),
-  };
-};
+/* -------------------------------------------------------------------------- */
+/*  Service                                                                    */
+/* -------------------------------------------------------------------------- */
 
 class OcrService {
-  async isAvailable(): Promise<boolean> {
-    return nativeOCRAvailable && MlKitOcr !== null;
+  isAvailable(): boolean {
+    if (!nativeOCRAvailable || !recognizeTextFn) {
+      return false;
+    }
+    try {
+      return isSupportedFn ? isSupportedFn() : true;
+    } catch {
+      return false;
+    }
   }
 
   async recognizeFromUri(imageUri: string): Promise<OCRResult> {
-    if (!MlKitOcr) {
+    if (!recognizeTextFn) {
       throw new Error('OCR is not available. Use a native development build.');
     }
 
-    const rawBlocks = await MlKitOcr.detectFromUri(imageUri);
+    // recognizeText returns { text: string; blocks: TextBlock[] }
+    const result = await recognizeTextFn(imageUri);
 
-    if (!rawBlocks || rawBlocks.length === 0) {
+    if (!result || !result.blocks || result.blocks.length === 0) {
       return { blocks: [], fullText: '' };
     }
 
-    const blocks: OCRBlock[] = (rawBlocks as Array<Record<string, unknown>>).map((block) => {
-      const rawLines = (block.lines ?? []) as Array<Record<string, unknown>>;
-      const lines = rawLines.map((line) => ({
-        text: String(line.text ?? ''),
-        boundingBox: mapBoundingBox(line.frame as Record<string, unknown> | undefined),
+    const blocks: OCRBlock[] = result.blocks.map((block) => {
+      const lines = (block.lines ?? []).map((line) => ({
+        text: line.text ?? '',
+        boundingBox: {
+          x: line.boundingBox?.x ?? 0,
+          y: line.boundingBox?.y ?? 0,
+          width: line.boundingBox?.width ?? 0,
+          height: line.boundingBox?.height ?? 0,
+        },
       }));
 
       return {
-        text: String(block.text ?? ''),
-        boundingBox: mapBoundingBox(block.frame as Record<string, unknown> | undefined),
+        text: block.text ?? '',
+        boundingBox: {
+          x: block.boundingBox?.x ?? 0,
+          y: block.boundingBox?.y ?? 0,
+          width: block.boundingBox?.width ?? 0,
+          height: block.boundingBox?.height ?? 0,
+        },
         lines,
       };
     });
 
-    const fullText = blocks.map((b) => b.text).join('\n');
+    // Use the top-level `text` from RecognitionResult if available,
+    // otherwise join block texts
+    const fullText = result.text || blocks.map((b) => b.text).join('\n');
 
     return { blocks, fullText };
   }

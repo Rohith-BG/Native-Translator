@@ -1,9 +1,14 @@
 /**
  * Speech-to-Text service wrapper around expo-speech-recognition.
  *
- * Like modelManager.ts, we use a safe import so the UI still renders in
- * Expo Go (which lacks native STT bindings).
+ * Uses the ExpoSpeechRecognitionModule native module which provides:
+ *  - requestPermissionsAsync() for RECORD_AUDIO permission
+ *  - isRecognitionAvailable() to check if STT is ready
+ *  - start(options) / stop() / abort() for recognition lifecycle
+ *  - NativeModule event emitter for result / error / end / volumechange events
  */
+
+import type { EventSubscription } from 'expo-modules-core';
 
 type STTCallbacks = {
   onPartial: (text: string) => void;
@@ -12,54 +17,61 @@ type STTCallbacks = {
   onVolumeChange?: (db: number) => void;
 };
 
-let ExpoSpeechRecognition: {
-  start: (options: Record<string, unknown>) => Promise<void>;
-  stop: () => Promise<void>;
-  abort: () => Promise<void>;
-  isAvailable: () => Promise<boolean>;
-  requestPermissions: () => Promise<{ granted: boolean }>;
-  addListener: (event: string, cb: (...args: unknown[]) => void) => { remove: () => void };
-} | null = null;
+/* -------------------------------------------------------------------------- */
+/*  Safe import – the native module only exists in a development build.       */
+/* -------------------------------------------------------------------------- */
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let SpeechModule: any = null;
 let nativeSTTAvailable = true;
 
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require('expo-speech-recognition');
-  ExpoSpeechRecognition = mod.ExpoSpeechRecognition ?? mod.default ?? mod;
+  // The library exports { ExpoSpeechRecognitionModule } from its index
+  SpeechModule = mod.ExpoSpeechRecognitionModule ?? null;
 } catch {
   nativeSTTAvailable = false;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Service                                                                    */
+/* -------------------------------------------------------------------------- */
+
 class SpeechToTextService {
-  private subscriptions: Array<{ remove: () => void }> = [];
+  private subscriptions: EventSubscription[] = [];
   private isListening = false;
 
-  async isAvailable(): Promise<boolean> {
-    if (!nativeSTTAvailable || !ExpoSpeechRecognition) {
+  /** Check whether native STT is available on this device. */
+  isAvailable(): boolean {
+    if (!nativeSTTAvailable || !SpeechModule) {
       return false;
     }
     try {
-      return await ExpoSpeechRecognition.isAvailable();
+      // isRecognitionAvailable() is synchronous in expo-speech-recognition
+      return SpeechModule.isRecognitionAvailable();
     } catch {
       return false;
     }
   }
 
+  /** Request microphone + speech recognition permission. */
   async requestPermission(): Promise<boolean> {
-    if (!ExpoSpeechRecognition) {
+    if (!SpeechModule) {
       return false;
     }
     try {
-      const result = await ExpoSpeechRecognition.requestPermissions();
-      return result.granted;
+      // The correct method name is requestPermissionsAsync (returns PermissionResponse)
+      const result = await SpeechModule.requestPermissionsAsync();
+      return result.granted === true || result.status === 'granted';
     } catch {
       return false;
     }
   }
 
+  /** Start listening with the given BCP-47 locale (e.g. "en-US", "hi-IN"). */
   async start(locale: string, callbacks: STTCallbacks): Promise<void> {
-    if (!ExpoSpeechRecognition) {
+    if (!SpeechModule) {
       callbacks.onError(
         new Error('Speech recognition is not available. Use a native development build.'),
       );
@@ -72,11 +84,12 @@ class SpeechToTextService {
 
     this.clearSubscriptions();
 
+    /* ---- Wire up event listeners via NativeModule.addListener() ---- */
+
     this.subscriptions.push(
-      ExpoSpeechRecognition.addListener('result', (event: unknown) => {
-        const e = event as { results?: Array<{ transcript: string }>; isFinal?: boolean };
-        const transcript = e.results?.[0]?.transcript ?? '';
-        if (e.isFinal) {
+      SpeechModule.addListener('result', (event: { isFinal?: boolean; results?: Array<{ transcript: string }> }) => {
+        const transcript = event.results?.[0]?.transcript ?? '';
+        if (event.isFinal) {
           callbacks.onFinal(transcript);
         } else {
           callbacks.onPartial(transcript);
@@ -85,15 +98,14 @@ class SpeechToTextService {
     );
 
     this.subscriptions.push(
-      ExpoSpeechRecognition.addListener('error', (event: unknown) => {
-        const e = event as { error?: string; message?: string };
-        callbacks.onError(new Error(e.message ?? e.error ?? 'Speech recognition error'));
+      SpeechModule.addListener('error', (event: { error?: string; message?: string }) => {
+        callbacks.onError(new Error(event.message ?? event.error ?? 'Speech recognition error'));
         this.isListening = false;
       }),
     );
 
     this.subscriptions.push(
-      ExpoSpeechRecognition.addListener('end', () => {
+      SpeechModule.addListener('end', () => {
         this.isListening = false;
       }),
     );
@@ -101,15 +113,16 @@ class SpeechToTextService {
     if (callbacks.onVolumeChange) {
       const volumeCb = callbacks.onVolumeChange;
       this.subscriptions.push(
-        ExpoSpeechRecognition.addListener('volumechange', (event: unknown) => {
-          const e = event as { value?: number };
-          volumeCb(e.value ?? 0);
+        SpeechModule.addListener('volumechange', (event: { value?: number }) => {
+          volumeCb(event.value ?? 0);
         }),
       );
     }
 
+    /* ---- Start recognition ---- */
     try {
-      await ExpoSpeechRecognition.start({
+      // ExpoSpeechRecognitionModule.start() accepts ExpoSpeechRecognitionOptions
+      SpeechModule.start({
         lang: locale,
         interimResults: true,
         maxAlternatives: 1,
@@ -127,11 +140,11 @@ class SpeechToTextService {
   }
 
   async stop(): Promise<void> {
-    if (!ExpoSpeechRecognition || !this.isListening) {
+    if (!SpeechModule || !this.isListening) {
       return;
     }
     try {
-      await ExpoSpeechRecognition.stop();
+      SpeechModule.stop();
     } catch {
       // Silence — stop can fail if already stopped.
     }
@@ -139,11 +152,11 @@ class SpeechToTextService {
   }
 
   async abort(): Promise<void> {
-    if (!ExpoSpeechRecognition) {
+    if (!SpeechModule) {
       return;
     }
     try {
-      await ExpoSpeechRecognition.abort();
+      SpeechModule.abort();
     } catch {
       // Silence
     }

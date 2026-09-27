@@ -1,31 +1,39 @@
 /**
  * Document parser service for extracting text from PDF, DOCX, and TXT files.
  *
- * Uses expo-file-system for file reading. PDF and DOCX parsing use
- * lightweight pure-JS approaches to stay compatible with React Native
- * without heavy native dependencies.
+ * - TXT:  Read via File.text() (UTF-8).
+ * - PDF:  Read via File.arrayBuffer() → Latin-1 string → regex text extraction.
+ * - DOCX: Read via File.arrayBuffer() → fflate.unzipSync() → parse word/document.xml.
+ *
+ * Uses expo-file-system (SDK 57 File API) for file I/O.
  */
 
-let ExpoFileSystem: {
-  File: new (uri: string) => { text: () => Promise<string>; exists: boolean; size: number | null };
-} | null = null;
+import { unzipSync } from 'fflate';
+
+/* -------------------------------------------------------------------------- */
+/*  Safe import of expo-file-system                                            */
+/* -------------------------------------------------------------------------- */
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let FileClass: (new (...uris: string[]) => {
+  text: () => Promise<string>;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+  readonly exists: boolean;
+}) | null = null;
 
 let fileSystemAvailable = true;
 
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ExpoFileSystem = require('expo-file-system');
+  const mod = require('expo-file-system');
+  FileClass = mod.File ?? null;
 } catch {
   fileSystemAvailable = false;
 }
 
-const readFileAsString = async (uri: string): Promise<string> => {
-  if (!ExpoFileSystem) {
-    throw new Error('File system is not available. Use a native development build.');
-  }
-  const file = new ExpoFileSystem.File(uri);
-  return file.text();
-}
+/* -------------------------------------------------------------------------- */
+/*  Types                                                                      */
+/* -------------------------------------------------------------------------- */
 
 export type SupportedDocType = 'txt' | 'pdf' | 'docx' | 'unknown';
 
@@ -43,6 +51,10 @@ export interface ParsedDocument {
   info: DocumentInfo;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
 const detectDocType = (name: string, mimeType?: string): SupportedDocType => {
   const ext = name.split('.').pop()?.toLowerCase();
   if (ext === 'txt' || mimeType === 'text/plain') return 'txt';
@@ -57,7 +69,46 @@ const detectDocType = (name: string, mimeType?: string): SupportedDocType => {
 };
 
 /**
- * Extracts readable text from a PDF's raw content.
+ * Convert an ArrayBuffer to a Latin-1 (ISO 8859-1) string.
+ * Each byte becomes one char — this preserves binary values 0-255
+ * so regex-based text extraction works on PDF binary content.
+ */
+const arrayBufferToLatin1 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  // Process in chunks to avoid stack overflow on large files
+  const chunkSize = 8192;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    parts.push(String.fromCharCode(...chunk));
+  }
+  return parts.join('');
+};
+
+/**
+ * Decode a Uint8Array to a UTF-8 string.
+ */
+const uint8ArrayToString = (arr: Uint8Array): string => {
+  // TextDecoder should be available in Hermes (RN 0.86+)
+  if (typeof TextDecoder !== 'undefined') {
+    return new TextDecoder('utf-8').decode(arr);
+  }
+  // Fallback for older environments
+  const chunkSize = 8192;
+  const parts: string[] = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    const chunk = arr.subarray(i, Math.min(i + chunkSize, arr.length));
+    parts.push(String.fromCharCode(...chunk));
+  }
+  return decodeURIComponent(escape(parts.join('')));
+};
+
+/* -------------------------------------------------------------------------- */
+/*  PDF text extraction                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Extracts readable text from a PDF's raw Latin-1 content.
  *
  * PDF text streams contain operators like `(text) Tj` or `<hex> Tj`.
  * This is a best-effort extractor for text-based PDFs — scanned/image
@@ -88,12 +139,26 @@ const extractTextFromPdfRaw = (raw: string): string => {
     }
   }
 
+  // Also try BT...ET blocks with Td/Tm positioning + text show operators
+  // This catches more text in PDFs that use complex text positioning
+  const btRegex = /BT\s([\s\S]*?)ET/g;
+  while ((match = btRegex.exec(raw)) !== null) {
+    const block = match[1];
+    const textOps = /\(([^)]+)\)\s*(?:Tj|TJ|'|")/g;
+    let textMatch: RegExpExecArray | null;
+    while ((textMatch = textOps.exec(block)) !== null) {
+      if (textMatch[1] && !textFragments.includes(textMatch[1])) {
+        textFragments.push(textMatch[1]);
+      }
+    }
+  }
+
   if (textFragments.length === 0) {
     return '';
   }
 
   // Unescape common PDF escape sequences
-  const unescape = (s: string): string =>
+  const unescapePdf = (s: string): string =>
     s
       .replace(/\\n/g, '\n')
       .replace(/\\r/g, '\r')
@@ -103,7 +168,7 @@ const extractTextFromPdfRaw = (raw: string): string => {
       .replace(/\\\\/g, '\\');
 
   return textFragments
-    .map(unescape)
+    .map(unescapePdf)
     .join(' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -117,46 +182,64 @@ const estimatePdfPageCount = (raw: string): number => {
   return pages ? pages.length : 1;
 };
 
+/* -------------------------------------------------------------------------- */
+/*  DOCX text extraction                                                       */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Extracts text from a DOCX file's raw XML content.
- *
- * DOCX is a ZIP archive; when read as a string in RN, we may get
- * garbled content, but we can still try to extract <w:t> text nodes
- * if the raw content is readable. For better results, we try base64
- * reading and manual XML extraction.
+ * Extracts text from a DOCX file by unzipping it and parsing
+ * the word/document.xml content for <w:t> text nodes.
  */
-const extractTextFromDocxRaw = (raw: string): string => {
-  // DOCX XML contains <w:t> tags with the actual text
+const extractTextFromDocx = (buffer: ArrayBuffer): string => {
+  const data = new Uint8Array(buffer);
+
+  let files: Record<string, Uint8Array>;
+  try {
+    files = unzipSync(data);
+  } catch {
+    return '';
+  }
+
+  // Find word/document.xml (case-insensitive lookup)
+  let documentXml = '';
+  for (const [path, content] of Object.entries(files)) {
+    if (path.toLowerCase() === 'word/document.xml') {
+      documentXml = uint8ArrayToString(content);
+      break;
+    }
+  }
+
+  if (!documentXml) {
+    return '';
+  }
+
+  // Extract text from <w:t> tags
   const textFragments: string[] = [];
   const wtRegex = /<w:t[^>]*>([^<]*)<\/w:t>/g;
   let match: RegExpExecArray | null;
-  while ((match = wtRegex.exec(raw)) !== null) {
-    if (match[1]) {
+  while ((match = wtRegex.exec(documentXml)) !== null) {
+    if (match[1] !== undefined) {
       textFragments.push(match[1]);
     }
   }
 
   if (textFragments.length > 0) {
-    return textFragments.join(' ').trim();
+    // Reconstruct text: <w:t> tags within the same <w:r> are concatenated,
+    // and paragraph breaks (<w:p>) add newlines.
+    // Simple approach: join with space, then clean up
+    return textFragments.join(' ').replace(/\s{2,}/g, ' ').trim();
   }
 
-  // Fallback: try to find any readable text between XML-like tags
-  const plainTextParts: string[] = [];
-  const genericRegex = />([^<]{2,})</g;
-  while ((match = genericRegex.exec(raw)) !== null) {
-    const text = match[1].trim();
-    // Filter out XML/binary artifacts
-    if (text && !/^[\x00-\x1f\x7f-\x9f]+$/.test(text) && text.length > 1) {
-      plainTextParts.push(text);
-    }
-  }
-
-  return plainTextParts.join(' ').trim();
+  return '';
 };
 
+/* -------------------------------------------------------------------------- */
+/*  Service class                                                              */
+/* -------------------------------------------------------------------------- */
+
 class DocumentParser {
-  async isAvailable(): Promise<boolean> {
-    return fileSystemAvailable && FileSystem !== null;
+  isAvailable(): boolean {
+    return fileSystemAvailable && FileClass !== null;
   }
 
   buildDocumentInfo(
@@ -175,7 +258,7 @@ class DocumentParser {
   }
 
   async parse(info: DocumentInfo): Promise<ParsedDocument> {
-    if (!ExpoFileSystem) {
+    if (!FileClass) {
       throw new Error('File system is not available. Use a native development build.');
     }
 
@@ -194,7 +277,8 @@ class DocumentParser {
   }
 
   private async parseTxt(info: DocumentInfo): Promise<ParsedDocument> {
-    const text = await readFileAsString(info.uri);
+    const file = new FileClass!(info.uri);
+    const text = await file.text();
 
     if (!text.trim()) {
       throw new Error('The file is empty — no text to translate.');
@@ -208,13 +292,17 @@ class DocumentParser {
   }
 
   private async parsePdf(info: DocumentInfo): Promise<ParsedDocument> {
-    // Read PDF as latin1/ISO-8859-1 to preserve byte values for text extraction
-    let raw: string;
+    const file = new FileClass!(info.uri);
+
+    let buffer: ArrayBuffer;
     try {
-      raw = await readFileAsString(info.uri);
+      buffer = await file.arrayBuffer();
     } catch {
       throw new Error('Unable to read the PDF file. It may be corrupted or encrypted.');
     }
+
+    // Convert to Latin-1 string to preserve all byte values for regex extraction
+    const raw = arrayBufferToLatin1(buffer);
 
     // Verify it's actually a PDF
     if (!raw.startsWith('%PDF')) {
@@ -234,14 +322,22 @@ class DocumentParser {
   }
 
   private async parseDocx(info: DocumentInfo): Promise<ParsedDocument> {
-    let raw: string;
+    const file = new FileClass!(info.uri);
+
+    let buffer: ArrayBuffer;
     try {
-      raw = await readFileAsString(info.uri);
+      buffer = await file.arrayBuffer();
     } catch {
       throw new Error('Unable to read the DOCX file. It may be corrupted.');
     }
 
-    const text = extractTextFromDocxRaw(raw);
+    // Verify it starts with a ZIP signature (PK\x03\x04)
+    const header = new Uint8Array(buffer, 0, 4);
+    if (header[0] !== 0x50 || header[1] !== 0x4B || header[2] !== 0x03 || header[3] !== 0x04) {
+      throw new Error('This file does not appear to be a valid DOCX document.');
+    }
+
+    const text = extractTextFromDocx(buffer);
 
     if (!text) {
       throw new Error(
